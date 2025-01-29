@@ -12,7 +12,7 @@ Prometheus metrics from http://100.100.100.100/metrics (refresh every 2s)
 Counters are accumulated, other metrics show last scraped value.
 
 tailscaled_advertised_routes{} = 0.00
-tailscaled_approved_routes{} = 924.00
+tailscaled_approved_routes{} = 0.00
 tailscaled_inbound_bytes_total{path="derp"} = 1223988.00
 tailscaled_inbound_bytes_total{path="direct_ipv4"} = 10566884.00
 tailscaled_inbound_bytes_total{path="direct_ipv6"} = 10565710.00

@@ -32,3 +32,15 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+
+brews:
+  - name: met
+    repository:
+      owner: jaxxstorm
+      name: homebrew-tap
+    commit_author:
+      name: GitHub Actions
+      email: bot@leebriggs.co.uk
+    directory: Formula
+    homepage: "https://leebriggs.co.uk"
+    description: "Dynamically render prometheus metrics in your terminal."
