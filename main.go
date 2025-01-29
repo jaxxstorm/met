@@ -20,7 +20,6 @@ import (
 
 var Version = "dev"
 
-// CLI flags
 type CLI struct {
 	Endpoint  string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
 	Interval  time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
@@ -67,12 +66,15 @@ type model struct {
 	metricsIndex map[string]int
 	err          error
 	quit         bool
-	selected     int
 
 	includes     []string
 	excludes     []string
 	labelFilters []labelFilter
 	showGraph    bool
+
+	selected   int
+	pageStart  int
+	pageSize   int
 }
 
 type tickMsg time.Time
@@ -92,6 +94,7 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
 	case tickMsg:
 		return m, fetchMetricsCmd(m.endpoint)
 
@@ -110,6 +113,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			newM.initialized = true
 		}
+		// Make sure selected/pageStart are still valid if the list shrinks
+		if newM.selected >= len(newM.metricsList) {
+			newM.selected = len(newM.metricsList) - 1
+		}
+		newM.enforcePageBounds()
 		return newM, tickCmd(newM.interval)
 
 	case tea.KeyMsg:
@@ -117,19 +125,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			m.quit = true
 			return m, tea.Quit
+
 		case "up", "k":
 			if m.selected > 0 {
 				m.selected--
+				m.enforcePageBounds()
 			}
 		case "down", "j":
 			if m.selected < len(m.metricsList)-1 {
 				m.selected++
+				m.enforcePageBounds()
+			}
+		case "pgup":
+			m.pageStart -= m.pageSize
+			if m.pageStart < 0 {
+				m.pageStart = 0
+			}
+			// if selected is now < pageStart, fix that
+			if m.selected < m.pageStart {
+				m.selected = m.pageStart
+			}
+		case "pgdn":
+			m.pageStart += m.pageSize
+			maxStart := len(m.metricsList) - m.pageSize
+			if maxStart < 0 {
+				maxStart = 0
+			}
+			if m.pageStart > maxStart {
+				m.pageStart = maxStart
+			}
+			// if selected is beyond pageStart+pageSize-1, fix that
+			pageEnd := m.pageStart + m.pageSize - 1
+			if m.selected > pageEnd {
+				m.selected = pageEnd
 			}
 		}
 	}
 	return m, nil
 }
 
+// Enforce that selected is in [pageStart, pageStart+pageSize-1]
+func (m *model) enforcePageBounds() {
+	pageEnd := m.pageStart + m.pageSize - 1
+	if m.selected < m.pageStart {
+		m.pageStart = m.selected
+	} else if m.selected > pageEnd {
+		m.pageStart = m.selected - (m.pageSize - 1)
+	}
+	if m.pageStart < 0 {
+		m.pageStart = 0
+	}
+}
+
+// View
 func (m model) View() string {
 	if m.quit {
 		return ""
@@ -142,28 +190,29 @@ func (m model) View() string {
 			m.endpoint, m.interval)
 	}
 
-	listView := m.renderList()
+	tableView := m.renderTablePage()
 	var graphView string
 	if m.showGraph {
 		graphView = m.renderGraph()
 	}
-
 	var sb strings.Builder
-	sb.WriteString(listView)
+	sb.WriteString(tableView)
 	if graphView != "" {
 		sb.WriteString("\n")
 		sb.WriteString(graphView)
 	}
-	sb.WriteString("\n\nPress q or Ctrl+C to quit. Use ↑/↓ or j/k to select.\n")
+	sb.WriteString("\n\nUse ↑/↓ to move selection, PgUp/PgDn to scroll.\nPress q or Ctrl+C to quit.\n")
 	return sb.String()
 }
 
-func (m model) renderList() string {
+// Only render the slice in the current page, plus a table header.
+func (m model) renderTablePage() string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Prometheus metrics from %s (every %s)\n\n", m.endpoint, m.interval))
 
 	tableString := &strings.Builder{}
 	table := tablewriter.NewWriter(tableString)
+
 	table.SetHeader([]string{"Key", "Value", "Inc Diff", "Total Diff"})
 	table.SetAutoWrapText(false)
 	table.SetBorder(true)
@@ -173,7 +222,16 @@ func (m model) renderList() string {
 	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 
-	for i, md := range m.metricsList {
+	// page slice
+	start := m.pageStart
+	end := start + m.pageSize
+	if end > len(m.metricsList) {
+		end = len(m.metricsList)
+	}
+
+	for i := start; i < end; i++ {
+		md := m.metricsList[i]
+
 		cursor := " "
 		if i == m.selected {
 			cursor = ">"
@@ -183,8 +241,8 @@ func (m model) renderList() string {
 		if !md.isCounter {
 			valStr = fmt.Sprintf("%.2f", md.gaugeVal)
 		}
-
-		var incDiffStr string
+		incDiffStr := "--"
+		totalDiffStr := "--"
 		if md.isCounter {
 			if md.lastDelta > 0 {
 				incDiffStr = fmt.Sprintf("\x1b[32m+%.2f\x1b[0m", md.lastDelta)
@@ -193,23 +251,23 @@ func (m model) renderList() string {
 			} else {
 				incDiffStr = "0.00"
 			}
-		} else {
-			incDiffStr = "--"
-		}
-
-		totalDiffStr := "--"
-		if md.isCounter {
 			totalDiffStr = fmt.Sprintf("%.2f", md.accumVal)
 		}
-
 		keyStr := fmt.Sprintf("%s %s", cursor, md.key)
 		table.Append([]string{keyStr, valStr, incDiffStr, totalDiffStr})
 	}
 	table.Render()
 	sb.WriteString(tableString.String())
+
+	// Footer line for pagination
+	sb.WriteString(
+		fmt.Sprintf("\nPage %d-%d of %d total metrics\n",
+			start+1, end, len(m.metricsList)),
+	)
 	return sb.String()
 }
 
+// If "showGraph" is true, show the graph for the selected metric
 func (m model) renderGraph() string {
 	if m.selected < 0 || m.selected >= len(m.metricsList) {
 		return ""
@@ -228,8 +286,7 @@ func (m model) renderGraph() string {
 	return graph
 }
 
-// ---------- Fetch & Tick Commands ----------
-
+// Commands
 func fetchMetricsCmd(endpoint string) tea.Cmd {
 	return func() tea.Msg {
 		fams, err := scrapeMetrics(endpoint)
@@ -260,13 +317,11 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 	return parser.TextToMetricFamilies(resp.Body)
 }
 
-// ---------- Updating Logic ----------
-
+// Main update logic
 func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	if m.metricsIndex == nil {
 		m.metricsIndex = make(map[string]int)
 	}
-
 	seen := make(map[string]struct{})
 	for name, mf := range families {
 		for _, pm := range mf.Metric {
@@ -279,26 +334,24 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 			if !m.passLabelFilters(pm.Label) {
 				continue
 			}
-
 			raw := getRawValue(mf, pm)
+
 			idx, found := m.metricsIndex[key]
 			if !found {
-				// It's brand new. Initialize so the first incremental diff is 0.
 				md := metricData{
 					key:       key,
 					name:      name,
 					labels:    lblStr,
 					isCounter: mf.GetType() == dto.MetricType_COUNTER,
 				}
+				// first time => no big diff
 				if md.isCounter {
-					md.prevVal = raw               // make first diff = 0
-					md.lastScrapedVal = raw        // for the table's "Value"
-					md.lastDelta = 0               // no increment yet
-					// accumVal remains 0 until next scrape
+					md.prevVal = raw
+					md.lastScrapedVal = raw
+					md.lastDelta = 0
 				} else {
 					md.gaugeVal = raw
 				}
-
 				m.metricsList = append(m.metricsList, md)
 				idx = len(m.metricsList) - 1
 				m.metricsIndex[key] = idx
@@ -308,14 +361,11 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 			if md.isCounter {
 				diff := raw - md.prevVal
 				if diff < 0 {
-					// If the counter reset or decreased
 					md.accumVal += raw
 					md.lastDelta = raw
 				} else if diff > 0 {
 					md.accumVal += diff
 					md.lastDelta = diff
-				} else {
-					// diff == 0 => no increment
 				}
 				md.prevVal = raw
 				md.lastScrapedVal = raw
@@ -333,12 +383,11 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 			if len(md.history) > maxHistory {
 				md.history = md.history[len(md.history)-maxHistory:]
 			}
-
 			m.metricsList[idx] = md
 			seen[key] = struct{}{}
 		}
 	}
-
+	// remove stale metrics
 	newList := make([]metricData, 0, len(seen))
 	newIndex := make(map[string]int, len(seen))
 	for _, md := range m.metricsList {
@@ -352,7 +401,6 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	return m
 }
 
-// getRawValue extracts the numeric value from a Prometheus metric family for a single Metric.
 func getRawValue(mf *dto.MetricFamily, pm *dto.Metric) float64 {
 	switch mf.GetType() {
 	case dto.MetricType_COUNTER:
@@ -365,13 +413,11 @@ func getRawValue(mf *dto.MetricFamily, pm *dto.Metric) float64 {
 		return pm.GetSummary().GetSampleSum()
 	case dto.MetricType_HISTOGRAM:
 		return pm.GetHistogram().GetSampleSum()
-	default:
-		return 0
 	}
+	return 0
 }
 
-// ---------- Filtering ----------
-
+// Substring-based filters
 func (m model) passNameFilters(metricName string) bool {
 	if len(m.includes) > 0 {
 		matchedAny := false
@@ -454,6 +500,11 @@ func main() {
 		excludes:     cli.Exclude,
 		labelFilters: labelFilters,
 		showGraph:    cli.ShowGraph,
+
+		// Initialize paging
+		pageSize:  15, // you can adjust this as needed
+		pageStart: 0,
+		selected:  0,
 	}
 
 	switch kctx.Command() {
