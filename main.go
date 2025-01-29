@@ -21,11 +21,11 @@ import (
 var Version = "dev"
 
 type CLI struct {
-	Endpoint  string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
+	Endpoint  string        `help:"Metrics endpoint to poll" short:"e" env:"MET_ENDPOINT"`
 	Interval  time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
 	Version   bool          `help:"Print version information" short:"v"`
 	Include   []string      `help:"Include metrics whose name contains these substrings" short:"i"`
-	Exclude   []string      `help:"Exclude metrics whose name contains these substrings" short:"e"`
+	Exclude   []string      `help:"Exclude metrics whose name contains these substrings" short:"x"`
 	Labels    []string      `help:"Show only metrics with label=value (ANDed)" short:"l"`
 	ShowGraph bool          `help:"Display an ASCII graph for the selected metric" default:"false"`
 }
