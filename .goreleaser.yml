@@ -5,7 +5,7 @@ before:
     - go mod tidy
 
 builds:
-  - id: tacl
+  - id: met
     goos:
       - darwin
       - windows
