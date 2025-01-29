@@ -21,12 +21,13 @@ import (
 var Version = "dev"
 
 type CLI struct {
-	Endpoint string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
-	Interval time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
-	Version  bool          `help:"Print version information" short:"v"`
-	Include  []string      `help:"Include metrics whose name contains these substrings" short:"i"`
-	Exclude  []string      `help:"Exclude metrics whose name contains these substrings" short:"e"`
-	Labels   []string      `help:"Show only metrics with label=value (ANDed)" short:"l"`
+	Endpoint  string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
+	Interval  time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
+	Version   bool          `help:"Print version information" short:"v"`
+	Include   []string      `help:"Include metrics whose name contains these substrings" short:"i"`
+	Exclude   []string      `help:"Exclude metrics whose name contains these substrings" short:"e"`
+	Labels    []string      `help:"Show only metrics with label=value (ANDed)" short:"l"`
+	ShowGraph bool          `help:"Display an ASCII graph for the selected metric" default:"false"`
 }
 
 func (c *CLI) AfterApply() error {
@@ -70,9 +71,12 @@ type model struct {
 	includes     []string
 	excludes     []string
 	labelFilters []labelFilter
+
+	showGraph bool
 }
 
 type tickMsg time.Time
+
 type metricsMsg struct {
 	families map[string]*dto.MetricFamily
 	err      error
@@ -140,12 +144,17 @@ func (m model) View() string {
 	}
 
 	listView := m.renderList()
-	graphView := m.renderGraph()
+	var graphView string
+	if m.showGraph {
+		graphView = m.renderGraph()
+	}
 
 	var sb strings.Builder
 	sb.WriteString(listView)
-	sb.WriteString("\n")
-	sb.WriteString(graphView)
+	if graphView != "" {
+		sb.WriteString("\n")
+		sb.WriteString(graphView)
+	}
 	sb.WriteString("\n\nPress q or Ctrl+C to quit. Use ↑/↓ or j/k to select.\n")
 	return sb.String()
 }
@@ -156,7 +165,7 @@ func (m model) renderList() string {
 
 	tableString := &strings.Builder{}
 	table := tablewriter.NewWriter(tableString)
-	table.SetHeader([]string{"Key", "Value", "Diff", "Total Diff"})
+	table.SetHeader([]string{"Key", "Value", "Inc Diff", "Total Diff"})
 	table.SetAutoWrapText(false)
 	table.SetBorder(true)
 	table.SetRowSeparator("-")
@@ -344,7 +353,6 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	return m
 }
 
-// passNameFilters checks substring logic (include, exclude).
 func (m model) passNameFilters(metricName string) bool {
 	if len(m.includes) > 0 {
 		matchedAny := false
@@ -405,12 +413,13 @@ func main() {
 		kong.Description("An interactive terminal-based viewer for Prometheus metrics"),
 		kong.Vars{"version": Version},
 	)
+
 	if cli.Version {
 		fmt.Printf("met %s\n", Version)
 		return
 	}
 
-	labelFilters := []labelFilter{}
+	var labelFilters []labelFilter
 	for _, lf := range cli.Labels {
 		parts := strings.SplitN(lf, "=", 2)
 		if len(parts) != 2 {
@@ -425,6 +434,7 @@ func main() {
 		includes:     cli.Include,
 		excludes:     cli.Exclude,
 		labelFilters: labelFilters,
+		showGraph:    cli.ShowGraph,
 	}
 
 	switch kctx.Command() {
