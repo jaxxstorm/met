@@ -20,6 +20,7 @@ import (
 
 var Version = "dev"
 
+// CLI flags
 type CLI struct {
 	Endpoint  string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
 	Interval  time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
@@ -71,12 +72,10 @@ type model struct {
 	includes     []string
 	excludes     []string
 	labelFilters []labelFilter
-
-	showGraph bool
+	showGraph    bool
 }
 
 type tickMsg time.Time
-
 type metricsMsg struct {
 	families map[string]*dto.MetricFamily
 	err      error
@@ -180,10 +179,8 @@ func (m model) renderList() string {
 			cursor = ">"
 		}
 
-		var valStr string
-		if md.isCounter {
-			valStr = fmt.Sprintf("%.2f", md.lastScrapedVal)
-		} else {
+		valStr := fmt.Sprintf("%.2f", md.lastScrapedVal)
+		if !md.isCounter {
 			valStr = fmt.Sprintf("%.2f", md.gaugeVal)
 		}
 
@@ -200,11 +197,9 @@ func (m model) renderList() string {
 			incDiffStr = "--"
 		}
 
-		var totalDiffStr string
+		totalDiffStr := "--"
 		if md.isCounter {
 			totalDiffStr = fmt.Sprintf("%.2f", md.accumVal)
-		} else {
-			totalDiffStr = "--"
 		}
 
 		keyStr := fmt.Sprintf("%s %s", cursor, md.key)
@@ -232,6 +227,8 @@ func (m model) renderGraph() string {
 	)
 	return graph
 }
+
+// ---------- Fetch & Tick Commands ----------
 
 func fetchMetricsCmd(endpoint string) tea.Cmd {
 	return func() tea.Msg {
@@ -263,6 +260,8 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 	return parser.TextToMetricFamilies(resp.Body)
 }
 
+// ---------- Updating Logic ----------
+
 func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	if m.metricsIndex == nil {
 		m.metricsIndex = make(map[string]int)
@@ -281,42 +280,42 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 				continue
 			}
 
+			raw := getRawValue(mf, pm)
 			idx, found := m.metricsIndex[key]
 			if !found {
+				// It's brand new. Initialize so the first incremental diff is 0.
 				md := metricData{
 					key:       key,
 					name:      name,
 					labels:    lblStr,
 					isCounter: mf.GetType() == dto.MetricType_COUNTER,
 				}
+				if md.isCounter {
+					md.prevVal = raw               // make first diff = 0
+					md.lastScrapedVal = raw        // for the table's "Value"
+					md.lastDelta = 0               // no increment yet
+					// accumVal remains 0 until next scrape
+				} else {
+					md.gaugeVal = raw
+				}
+
 				m.metricsList = append(m.metricsList, md)
 				idx = len(m.metricsList) - 1
 				m.metricsIndex[key] = idx
 			}
 
 			md := m.metricsList[idx]
-			var raw float64
-			switch mf.GetType() {
-			case dto.MetricType_COUNTER:
-				raw = pm.GetCounter().GetValue()
-			case dto.MetricType_GAUGE:
-				raw = pm.GetGauge().GetValue()
-			case dto.MetricType_UNTYPED:
-				raw = pm.GetUntyped().GetValue()
-			case dto.MetricType_SUMMARY:
-				raw = pm.GetSummary().GetSampleSum()
-			case dto.MetricType_HISTOGRAM:
-				raw = pm.GetHistogram().GetSampleSum()
-			}
-
 			if md.isCounter {
 				diff := raw - md.prevVal
 				if diff < 0 {
+					// If the counter reset or decreased
 					md.accumVal += raw
 					md.lastDelta = raw
 				} else if diff > 0 {
 					md.accumVal += diff
 					md.lastDelta = diff
+				} else {
+					// diff == 0 => no increment
 				}
 				md.prevVal = raw
 				md.lastScrapedVal = raw
@@ -352,6 +351,26 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	m.metricsIndex = newIndex
 	return m
 }
+
+// getRawValue extracts the numeric value from a Prometheus metric family for a single Metric.
+func getRawValue(mf *dto.MetricFamily, pm *dto.Metric) float64 {
+	switch mf.GetType() {
+	case dto.MetricType_COUNTER:
+		return pm.GetCounter().GetValue()
+	case dto.MetricType_GAUGE:
+		return pm.GetGauge().GetValue()
+	case dto.MetricType_UNTYPED:
+		return pm.GetUntyped().GetValue()
+	case dto.MetricType_SUMMARY:
+		return pm.GetSummary().GetSampleSum()
+	case dto.MetricType_HISTOGRAM:
+		return pm.GetHistogram().GetSampleSum()
+	default:
+		return 0
+	}
+}
+
+// ---------- Filtering ----------
 
 func (m model) passNameFilters(metricName string) bool {
 	if len(m.includes) > 0 {
