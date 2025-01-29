@@ -21,12 +21,12 @@ import (
 var Version = "dev"
 
 type CLI struct {
-	Endpoint string        `help:"The Prometheus-compatible metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
-	Interval time.Duration `help:"How often to poll the endpoint" default:"2s" short:"s" env:"MET_INTERVAL"`
+	Endpoint string        `help:"Metrics endpoint to poll" short:"x" env:"MET_ENDPOINT"`
+	Interval time.Duration `help:"Poll interval" default:"2s" short:"s" env:"MET_INTERVAL"`
 	Version  bool          `help:"Print version information" short:"v"`
-	Include  []string      `help:"Include only metrics that match the given glob" short:"i"`
-	Exclude  []string      `help:"Exclude metrics that match the given glob" short:"e"`
-	Labels   []string      `help:"Show only metrics with the given labels" short:"l"`
+	Include  []string      `help:"Include metrics whose name contains these substrings" short:"i"`
+	Exclude  []string      `help:"Exclude metrics whose name contains these substrings" short:"e"`
+	Labels   []string      `help:"Show only metrics with label=value (ANDed)" short:"l"`
 }
 
 func (c *CLI) AfterApply() error {
@@ -34,7 +34,7 @@ func (c *CLI) AfterApply() error {
 		return nil
 	}
 	if c.Endpoint == "" {
-		return errors.New("must specify an endpoint to scrape - eg: --endpoint http://localhost:9090/metrics")
+		return errors.New("must specify an endpoint to scrape, e.g. --endpoint http://localhost:9090/metrics")
 	}
 	return nil
 }
@@ -52,6 +52,11 @@ type metricData struct {
 	lastScrapedVal float64
 }
 
+type labelFilter struct {
+	name  string
+	value string
+}
+
 type model struct {
 	endpoint     string
 	interval     time.Duration
@@ -61,6 +66,10 @@ type model struct {
 	err          error
 	quit         bool
 	selected     int
+
+	includes     []string
+	excludes     []string
+	labelFilters []labelFilter
 }
 
 type tickMsg time.Time
@@ -88,17 +97,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err
 			return m, tickCmd(m.interval)
 		}
-		updated := updateMetrics(m, msg.families)
-		if !updated.initialized {
-			sort.Slice(updated.metricsList, func(i, j int) bool {
-				if updated.metricsList[i].name == updated.metricsList[j].name {
-					return updated.metricsList[i].labels < updated.metricsList[j].labels
+		newM := updateMetrics(m, msg.families)
+		if !newM.initialized {
+			sort.Slice(newM.metricsList, func(i, j int) bool {
+				if newM.metricsList[i].name == newM.metricsList[j].name {
+					return newM.metricsList[i].labels < newM.metricsList[j].labels
 				}
-				return updated.metricsList[i].name < updated.metricsList[j].name
+				return newM.metricsList[i].name < newM.metricsList[j].name
 			})
-			updated.initialized = true
+			newM.initialized = true
 		}
-		return updated, tickCmd(m.interval)
+		return newM, tickCmd(newM.interval)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -123,32 +132,31 @@ func (m model) View() string {
 		return ""
 	}
 	if m.err != nil {
-		return fmt.Sprintf("Error fetching metrics: %v\n\nPress q or Ctrl+C to quit.\n", m.err)
+		return fmt.Sprintf("Error: %v\n\nPress q or Ctrl+C to quit.\n", m.err)
 	}
-	listView := m.renderList()
-	graphView := m.renderGraph()
-
-	var b strings.Builder
-	b.WriteString(listView)
-	b.WriteString("\n")
-	b.WriteString(graphView)
-	b.WriteString("\n\nPress q or Ctrl+C to quit. Use ↑/↓ or j/k to select.\n")
-	return b.String()
-}
-
-// renderList: uses tablewriter for columns: [Key | Value | Inc Diff | Total Diff].
-func (m model) renderList() string {
 	if len(m.metricsList) == 0 {
-		return fmt.Sprintf("Prometheus metrics from %s (every %s)\nNo metrics found or still fetching...\n",
+		return fmt.Sprintf("Prometheus metrics from %s (every %s)\nNo metrics matched filters or still fetching...\n\nPress q or Ctrl+C to quit.\n",
 			m.endpoint, m.interval)
 	}
 
+	listView := m.renderList()
+	graphView := m.renderGraph()
+
+	var sb strings.Builder
+	sb.WriteString(listView)
+	sb.WriteString("\n")
+	sb.WriteString(graphView)
+	sb.WriteString("\n\nPress q or Ctrl+C to quit. Use ↑/↓ or j/k to select.\n")
+	return sb.String()
+}
+
+func (m model) renderList() string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Prometheus metrics from %s (every %s)\n\n", m.endpoint, m.interval))
 
 	tableString := &strings.Builder{}
 	table := tablewriter.NewWriter(tableString)
-	table.SetHeader([]string{"Key", "Value", "Inc Diff", "Total Diff"})
+	table.SetHeader([]string{"Key", "Value", "Diff", "Total Diff"})
 	table.SetAutoWrapText(false)
 	table.SetBorder(true)
 	table.SetRowSeparator("-")
@@ -163,7 +171,6 @@ func (m model) renderList() string {
 			cursor = ">"
 		}
 
-		// Value (lastScrapedVal for counters, gaugeVal for gauges)
 		var valStr string
 		if md.isCounter {
 			valStr = fmt.Sprintf("%.2f", md.lastScrapedVal)
@@ -171,7 +178,6 @@ func (m model) renderList() string {
 			valStr = fmt.Sprintf("%.2f", md.gaugeVal)
 		}
 
-		// Inc Diff
 		var incDiffStr string
 		if md.isCounter {
 			if md.lastDelta > 0 {
@@ -185,7 +191,6 @@ func (m model) renderList() string {
 			incDiffStr = "--"
 		}
 
-		// Total Diff (accumVal) if counter, else --
 		var totalDiffStr string
 		if md.isCounter {
 			totalDiffStr = fmt.Sprintf("%.2f", md.accumVal)
@@ -197,13 +202,12 @@ func (m model) renderList() string {
 		table.Append([]string{keyStr, valStr, incDiffStr, totalDiffStr})
 	}
 	table.Render()
-
 	sb.WriteString(tableString.String())
 	return sb.String()
 }
 
 func (m model) renderGraph() string {
-	if len(m.metricsList) == 0 || m.selected < 0 || m.selected >= len(m.metricsList) {
+	if m.selected < 0 || m.selected >= len(m.metricsList) {
 		return ""
 	}
 	md := m.metricsList[m.selected]
@@ -234,9 +238,7 @@ func tickCmd(interval time.Duration) tea.Cmd {
 }
 
 func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -252,17 +254,23 @@ func scrapeMetrics(url string) (map[string]*dto.MetricFamily, error) {
 	return parser.TextToMetricFamilies(resp.Body)
 }
 
-// updateMetrics: counters track both an incremental diff (lastDelta) and a total diff (accumVal).
 func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	if m.metricsIndex == nil {
 		m.metricsIndex = make(map[string]int)
 	}
-	seen := make(map[string]struct{})
 
+	seen := make(map[string]struct{})
 	for name, mf := range families {
 		for _, pm := range mf.Metric {
 			lblStr, lblKey := renderLabels(pm.Label)
 			key := name + "{" + lblKey + "}"
+
+			if !m.passNameFilters(name) {
+				continue
+			}
+			if !m.passLabelFilters(pm.Label) {
+				continue
+			}
 
 			idx, found := m.metricsIndex[key]
 			if !found {
@@ -276,8 +284,8 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 				idx = len(m.metricsList) - 1
 				m.metricsIndex[key] = idx
 			}
-			md := m.metricsList[idx]
 
+			md := m.metricsList[idx]
 			var raw float64
 			switch mf.GetType() {
 			case dto.MetricType_COUNTER:
@@ -295,15 +303,12 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 			if md.isCounter {
 				diff := raw - md.prevVal
 				if diff < 0 {
-					// Reset or decreased
 					md.accumVal += raw
 					md.lastDelta = raw
 				} else if diff > 0 {
 					md.accumVal += diff
 					md.lastDelta = diff
 				}
-				// If diff == 0, keep lastDelta from previous so we see
-				// highlight until next increment or reset
 				md.prevVal = raw
 				md.lastScrapedVal = raw
 			} else {
@@ -312,22 +317,20 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 				md.lastScrapedVal = raw
 			}
 
-			var current float64
+			curVal := md.gaugeVal
 			if md.isCounter {
-				current = md.accumVal
-			} else {
-				current = md.gaugeVal
+				curVal = md.accumVal
 			}
-			md.history = append(md.history, current)
+			md.history = append(md.history, curVal)
 			if len(md.history) > maxHistory {
 				md.history = md.history[len(md.history)-maxHistory:]
 			}
+
 			m.metricsList[idx] = md
 			seen[key] = struct{}{}
 		}
 	}
 
-	// Remove stale metrics
 	newList := make([]metricData, 0, len(seen))
 	newIndex := make(map[string]int, len(seen))
 	for _, md := range m.metricsList {
@@ -339,6 +342,45 @@ func updateMetrics(m model, families map[string]*dto.MetricFamily) model {
 	m.metricsList = newList
 	m.metricsIndex = newIndex
 	return m
+}
+
+// passNameFilters checks substring logic (include, exclude).
+func (m model) passNameFilters(metricName string) bool {
+	if len(m.includes) > 0 {
+		matchedAny := false
+		for _, inc := range m.includes {
+			if strings.Contains(metricName, inc) {
+				matchedAny = true
+				break
+			}
+		}
+		if !matchedAny {
+			return false
+		}
+	}
+	for _, exc := range m.excludes {
+		if strings.Contains(metricName, exc) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m model) passLabelFilters(lbls []*dto.LabelPair) bool {
+	if len(m.labelFilters) == 0 {
+		return true
+	}
+	labelMap := make(map[string]string, len(lbls))
+	for _, lp := range lbls {
+		labelMap[lp.GetName()] = lp.GetValue()
+	}
+	for _, lf := range m.labelFilters {
+		val, ok := labelMap[lf.name]
+		if !ok || val != lf.value {
+			return false
+		}
+	}
+	return true
 }
 
 func renderLabels(lbls []*dto.LabelPair) (string, string) {
@@ -367,20 +409,29 @@ func main() {
 		fmt.Printf("met %s\n", Version)
 		return
 	}
+
+	labelFilters := []labelFilter{}
+	for _, lf := range cli.Labels {
+		parts := strings.SplitN(lf, "=", 2)
+		if len(parts) != 2 {
+			log.Fatalf("Bad --labels arg %q, want name=value", lf)
+		}
+		labelFilters = append(labelFilters, labelFilter{parts[0], parts[1]})
+	}
+
+	initialModel := model{
+		endpoint:     cli.Endpoint,
+		interval:     cli.Interval,
+		includes:     cli.Include,
+		excludes:     cli.Exclude,
+		labelFilters: labelFilters,
+	}
+
 	switch kctx.Command() {
 	default:
-		runProgram(cli)
-	}
-}
-
-func runProgram(cli CLI) {
-	initialModel := model{
-		endpoint: cli.Endpoint,
-		interval: cli.Interval,
-	}
-	p := tea.NewProgram(initialModel)
-	_, err := p.Run()
-	if err != nil {
-		log.Fatal(err)
+		p := tea.NewProgram(initialModel)
+		if _, err := p.Run(); err != nil {
+			log.Fatal(err)
+		}
 	}
 }
