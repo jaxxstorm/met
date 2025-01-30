@@ -3,7 +3,7 @@ module github.com/jaxxstorm/met
 go 1.23.2
 
 require (
-	github.com/alecthomas/kong v1.6.1
+	github.com/alecthomas/kong v1.7.0
 	github.com/charmbracelet/bubbletea v1.2.4
 	github.com/guptarohit/asciigraph v0.7.3
 	github.com/olekukonko/tablewriter v0.0.5
