@@ -6,7 +6,7 @@ Simply point it at an endpoint, and you'll get a nice periodically refreshed out
 
 Counter metrics will accumulate over time, whereas Gauge metrics will show the last returned value.
 
-![Met](assets/met.gif)
+![Met](assets/met-features.gif)
 
 ## Including and Excluding Metrics
 

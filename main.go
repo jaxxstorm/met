@@ -213,7 +213,7 @@ func (m model) renderTablePage() string {
 	tableString := &strings.Builder{}
 	table := tablewriter.NewWriter(tableString)
 
-	table.SetHeader([]string{"Key", "Value", "Inc Diff", "Total Diff"})
+	table.SetHeader([]string{"Key", "Value", "Delta", "Aggregate"})
 	table.SetAutoWrapText(false)
 	table.SetBorder(true)
 	table.SetRowSeparator("-")
