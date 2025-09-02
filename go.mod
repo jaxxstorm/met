@@ -8,7 +8,7 @@ require (
 	github.com/guptarohit/asciigraph v0.7.3
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/prometheus/client_model v0.6.1
-	github.com/prometheus/common v0.62.0
+	github.com/prometheus/common v1.20.3
 )
 
 require (
